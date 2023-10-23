@@ -1,4 +1,6 @@
 """Module with main app."""
+from typing import Union
+
 import requests
 from datetime import datetime
 
@@ -7,7 +9,9 @@ from fastapi import FastAPI
 from fastapi import HTTPException
 from pydantic import BaseModel
 from sqlalchemy import create_engine
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import Column, Integer, String, DateTime
+from sqlalchemy import desc
+from sqlalchemy.exc import NoResultFound
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm import Session
@@ -44,17 +48,22 @@ class QuestionsModel(BaseModel):
     answer: str
     created_at: datetime
 
+    class Config:
+        from_attributes = True
+
 
 class QuestionPostResponse(BaseModel):
     data: list[QuestionsModel] = None
 
 
 class Question(Base):
+    """Class for Question db model."""
     __tablename__ = 'questions'
     id = Column(Integer, primary_key=True)
     question = Column(String)
     answer = Column(String)
-    created_at = Column(String)
+    created_at = Column(DateTime)
+    stored_at = Column(DateTime, default=lambda x: datetime.utcnow())
 
     def __init__(self, data: dict):
         for k, v in data.items():
@@ -124,19 +133,29 @@ def _avoid_duplicates(
     return result
 
 
+def _get_previous_stored_question(session: Session) -> QuestionsModel | HTTPException:
+    """Functions that returns last stored question."""
+
+    try:
+        question = session.query(Question).order_by(desc(Question.stored_at)).limit(1).one()
+    except NoResultFound:
+        return HTTPException(400, detail="Where is no saved questions yet.")
+    return QuestionsModel.model_validate(question)
+
+
 # FastAPI
 app = FastAPI(title="Quiz questions App!")
 
 
-@app.post('/questions', response_model=QuestionPostResponse)
-def post_questions(request: QuestionsPostRequest, session: Session = Depends(get_db)):
+@app.post('/questions', response_model=None)
+def post_questions(request: QuestionsPostRequest,
+                   session: Session = Depends(get_db)) -> Union[QuestionsModel, HTTPException]:
     """Endpoint for Questions post request."""
 
+    response = _get_previous_stored_question(session)
     data = _get_questions_from_api(request.questions_num)
     questions = _transform_data(data)
     questions = _avoid_duplicates(session, questions, request.questions_num)
     _safe_questions(questions, session)
-    response = QuestionPostResponse()
-    response.data = questions
 
     return response
