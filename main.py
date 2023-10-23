@@ -2,12 +2,35 @@
 import requests
 from datetime import datetime
 
+from fastapi import Depends
 from fastapi import FastAPI
 from fastapi import HTTPException
 from pydantic import BaseModel
+from sqlalchemy import create_engine
+from sqlalchemy import Column, Integer, String
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session
 
 
-app = FastAPI(title="Quiz questions App!")
+# DB
+SQLALCHEMY_DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/postgres"
+
+engine = create_engine(SQLALCHEMY_DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+Base = declarative_base()
+
+
+def get_db():
+    db: Session = SessionLocal()
+    try:
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
 
 
 # Schemas & Model
@@ -24,6 +47,21 @@ class QuestionsModel(BaseModel):
 
 class QuestionPostResponse(BaseModel):
     data: list[QuestionsModel] = None
+
+
+class Question(Base):
+    __tablename__ = 'questions'
+    id = Column(Integer, primary_key=True)
+    question = Column(String)
+    answer = Column(String)
+    created_at = Column(String)
+
+    def __init__(self, data: dict):
+        for k, v in data.items():
+            setattr(self, k, v)
+
+
+Base.metadata.create_all(bind=engine)
 
 
 # Services for questions
@@ -48,11 +86,57 @@ def _transform_data(json_data: list[dict]) -> list[QuestionsModel]:
     return results
 
 
+def _safe_questions(questions_list: list[QuestionsModel],
+                    session: SessionLocal) -> None:
+    """Function that safe questions to database."""
+    session.add_all(
+        [Question(item.model_dump()) for item in questions_list]
+    )
+    session.commit()
+
+
+def _get_stored_ids(session: SessionLocal) -> set:
+    """Function that load ids of stored questions."""
+    stored_ids = set([
+        i[0] for i in session.query(Question).with_entities(Question.id).all()
+    ])
+    return stored_ids
+
+
+def _avoid_duplicates(
+        session: Session,
+        questions_list: list[QuestionsModel],
+        count: int) -> list[QuestionsModel]:
+    """Function that search and replace duplicates."""
+    questions_list = questions_list[:]
+    stored_ids = _get_stored_ids(session)
+    result = []
+    while len(result) < count:
+        for question in questions_list:
+            if question.id not in stored_ids:
+                result.append(question)
+                questions_list.remove(question)
+                continue
+            else:
+                questions_list.remove(question)
+                new_question = _get_questions_from_api(1)
+                result.extend(_transform_data(new_question))
+    return result
+
+
+# FastAPI
+app = FastAPI(title="Quiz questions App!")
+
+
 @app.post('/questions', response_model=QuestionPostResponse)
-def post_questions(request: QuestionsPostRequest):
-    """Endpoint for Questions post request, """
+def post_questions(request: QuestionsPostRequest, session: Session = Depends(get_db)):
+    """Endpoint for Questions post request."""
+
     data = _get_questions_from_api(request.questions_num)
     questions = _transform_data(data)
+    questions = _avoid_duplicates(session, questions, request.questions_num)
+    _safe_questions(questions, session)
     response = QuestionPostResponse()
     response.data = questions
+
     return response
